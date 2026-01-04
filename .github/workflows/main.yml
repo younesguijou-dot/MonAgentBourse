@@ -1,0 +1,39 @@
+name: Scan Bourse Quotidien
+
+Déclenchement automatique : Du lundi au vendredi à 15h45 GMT
+
+on:
+schedule:
+- cron: '45 15 * * 1-5'
+
+Déclenchement manuel pour tester le robot
+
+workflow_dispatch:
+
+jobs:
+run-bot:
+runs-on: ubuntu-latest
+steps:
+# Étape 1 : Connexion au dépôt GitHub
+- name: Recuperer le code
+uses: actions/checkout@v2
+
+  # Étape 2 : Préparation du moteur Python
+  - name: Configurer Python
+    uses: actions/setup-python@v2
+    with:
+      python-version: '3.9'
+
+  # Étape 3 : Installation du module de communication (Requests)
+  - name: Installer les outils
+    run: pip install requests
+
+  # Étape 4 : Lancement du script avec vos clés de sécurité
+  - name: Lancer le Scan
+    env:
+      TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+    run: python agent_bourse_casa.py
+
+
+FIN DU CODE
