@@ -3,3 +3,5 @@
           Rscript -e 'install.packages("remotes", repos="https://cloud.r-project.org")'
           Rscript -e 'remotes::install_github("AODiakite/casabourse")'
           Rscript -e 'cat("casabourse version:", as.character(packageVersion("casabourse")), "\n")'
+      - name: Fetch MASI
+        run: Rscript fetch_masi.R
