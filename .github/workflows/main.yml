@@ -2,25 +2,25 @@ name: Scan Bourse Quotidien
 
 on:
   schedule:
-    - cron: '45 14 * * 1-5'
+    - cron: "45 14 * * 1-5"   # ~15:45 Maroc (cron en UTC)
   workflow_dispatch:
 
 jobs:
   run-bot:
     runs-on: ubuntu-latest
     steps:
-      - name: Recuperer le code
+      - name: Checkout code
         uses: actions/checkout@v2
 
-      - name: Configurer Python
+      - name: Setup Python
         uses: actions/setup-python@v2
         with:
-          python-version: '3.9'
+          python-version: "3.9"
 
-      - name: Installer les outils
+      - name: Install dependencies
         run: pip install requests
 
-      - name: Lancer le Scan
+      - name: Run bot
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
