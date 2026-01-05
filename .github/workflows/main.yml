@@ -41,7 +41,7 @@ jobs:
       - name: Fetch MASI
         run: Rscript fetch_masi.R
 
-      # --- Python (avec cache pip basé sur requirements.txt) ---
+      # --- Python ---
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
