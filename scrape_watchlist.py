@@ -1,106 +1,95 @@
-import re
 import pandas as pd
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeout
 
 URL = "https://www.casablanca-bourse.com/fr/live-market/marche-actions-groupement"
 
-# Codes BVC (table) -> labels de ton bot
-MAP = {
-    "SNP": "SNEP",
-    "IAM": "IAM",
+WATCH_KEYWORDS = {
+    "SNEP": "SNEP",
+    "ITISSALAT": "IAM",
+    "AL-MAGHRIB": "IAM",
+    "TGCC": "TGCC",
     "HPS": "HPS",
-    "TGC": "TGCC",
 }
 
-OUT = "watchlist_prices.csv"
+OUT_FULL = "watchlist_full.csv"
+OUT_MINI = "watchlist_prices.csv"
 
 
-def fr_to_float(s: str):
-    """Convertit '1 234,50' -> 1234.5 ; '2,3%' -> 2.3 ; sinon None"""
-    if s is None:
-        return None
-    s = str(s).strip().replace("\xa0", " ")
-    if s in ("", "—", "-", "NA", "N/A"):
-        return None
-    s = s.replace("%", "")
-    s = s.replace(" ", "").replace(",", ".")
-    try:
-        return float(s)
-    except ValueError:
-        return None
+def pick_main_table(tables):
+    for df in tables:
+        cols = [str(c).strip().lower() for c in df.columns]
+        if "instrument" in cols and "dernier cours" in cols and "variation en %" in cols:
+            return df
+    # fallback: instrument + dernier cours
+    for df in tables:
+        cols = [str(c).strip().lower() for c in df.columns]
+        if "instrument" in cols and "dernier cours" in cols:
+            return df
+    return None
 
 
-def guess_last_and_pct(row_text: str):
-    """Heuristique: last = 1er nombre >0 ; pct = 1er nombre [-50,50] != last"""
-    nums = re.findall(r"[-+]?\d[\d\s]*,\d+|[-+]?\d+(?:\.\d+)?", row_text or "")
-    vals = [fr_to_float(n) for n in nums]
-    vals = [v for v in vals if v is not None]
-
-    last = next((v for v in vals if v > 0), None)
-    pct = next((v for v in vals if -50 <= v <= 50 and (last is None or v != last)), None)
-    return last, pct
-
-
-def scrape_watchlist():
-    rows_out = []
-
+def scrape_html():
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         page = browser.new_page(locale="fr-FR")
-
         try:
             page.goto(URL, wait_until="domcontentloaded", timeout=60_000)
-
-            # FIX: passer l'argument via keyword 'arg='
             page.wait_for_function(
-                """(codes) => document.body && codes.some(c => document.body.innerText.includes(c))""",
-                arg=list(MAP.keys()),
+                "() => document.body && document.body.innerText.includes('Instrument')",
                 timeout=60_000,
             )
-
-            trs = page.locator("tr")
-            n = trs.count()
-
-            for i in range(n):
-                t = trs.nth(i).inner_text().strip()
-                if not t:
-                    continue
-
-                tokens = [x.strip().upper() for x in re.split(r"\s+", t) if x.strip()]
-                code = None
-
-                if tokens and tokens[0] in MAP:
-                    code = tokens[0]
-                else:
-                    for tk in tokens[:6]:
-                        if tk in MAP:
-                            code = tk
-                            break
-
-                if not code:
-                    continue
-
-                last, pct = guess_last_and_pct(t)
-                rows_out.append({"symbol": MAP[code], "last": last, "pct": pct})
-
+            return page.content()
         except PlaywrightTimeout:
             page.screenshot(path="debug_timeout.png", full_page=True)
-            raise RuntimeError("Timeout loading page. See debug_timeout.png")
+            raise RuntimeError("Timeout: voir debug_timeout.png")
         finally:
             browser.close()
 
-    df = pd.DataFrame(rows_out).drop_duplicates(subset=["symbol"], keep="first")
 
-    # garantir toutes les lignes même si manquantes
-    for lbl in MAP.values():
-        if lbl not in set(df["symbol"].tolist()):
-            df = pd.concat([df, pd.DataFrame([{"symbol": lbl, "last": None, "pct": None}])], ignore_index=True)
+def filter_watchlist(df):
+    df = df.copy()
+    df.columns = [str(c).strip() for c in df.columns]
+    df["Instrument_str"] = df["Instrument"].astype(str).str.upper()
 
-    df = df.sort_values("symbol")
-    df.to_csv(OUT, index=False)
-    print(df)
-    print(f"OK: wrote {OUT}")
+    def map_symbol(instr):
+        for k, sym in WATCH_KEYWORDS.items():
+            if k in instr:
+                return sym
+        return None
+
+    df["symbol"] = df["Instrument_str"].map(map_symbol)
+    df = df[df["symbol"].notna()].copy()
+    return df
+
+
+def main():
+    html = scrape_html()
+
+    tables = pd.read_html(html, decimal=",", thousands=" ")
+    main_df = pick_main_table(tables)
+    if main_df is None:
+        raise RuntimeError("Table principale non trouvée (Instrument / Dernier cours).")
+
+    watch_df = filter_watchlist(main_df)
+
+    # Export complet (colonnes site)
+    watch_df.drop(columns=["Instrument_str"], errors="ignore").to_csv(OUT_FULL, index=False)
+
+    # Export mini: symbol, last, pct (pct = Variation en % telle quelle)
+    mini = pd.DataFrame()
+    mini["symbol"] = watch_df["symbol"]
+    mini["last"] = watch_df["Dernier cours"]
+    if "Variation en %" in watch_df.columns:
+        mini["pct"] = watch_df["Variation en %"]
+    else:
+        mini["pct"] = None
+
+    mini = mini.drop_duplicates(subset=["symbol"], keep="first").sort_values("symbol")
+    mini.to_csv(OUT_MINI, index=False)
+
+    print("OK:", OUT_FULL, OUT_MINI)
+    print(mini)
 
 
 if __name__ == "__main__":
-    scrape_watchlist()
+    main()
