@@ -3,7 +3,6 @@ from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeo
 
 URL = "https://www.casablanca-bourse.com/fr/live-market/marche-actions-groupement"
 
-# Basé sur ce que la colonne Instrument affiche réellement
 WATCH_KEYWORDS = {
     "SNEP": "SNEP",
     "ITISSALAT": "IAM",
@@ -16,97 +15,121 @@ OUT_FULL = "watchlist_full.csv"
 OUT_MINI = "watchlist_prices.csv"
 
 
-def pick_main_table(tables):
-    # priorité: table avec Instrument + Dernier cours + Variation en %
-    for df in tables:
-        cols = [str(c).strip().lower() for c in df.columns]
-        if "instrument" in cols and "dernier cours" in cols and "variation en %" in cols:
-            return df
-    # fallback: Instrument + Dernier cours
-    for df in tables:
-        cols = [str(c).strip().lower() for c in df.columns]
-        if "instrument" in cols and "dernier cours" in cols:
-            return df
+def map_symbol(instrument_text: str):
+    up = (instrument_text or "").upper()
+    for k, sym in WATCH_KEYWORDS.items():
+        if k in up:
+            return sym
     return None
 
 
-def scrape_html():
+def clean_cell_text(s: str):
+    if s is None:
+        return ""
+    return str(s).replace("\xa0", " ").strip()
+
+
+def scrape_tables_dom():
+    """
+    Retourne une liste de DataFrames extraits des tables pertinentes,
+    en lisant directement le DOM (sans pandas.read_html).
+    """
+    dfs = []
+
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         page = browser.new_page(locale="fr-FR")
+
         try:
             page.goto(URL, wait_until="domcontentloaded", timeout=60_000)
             page.wait_for_function(
                 "() => document.body && document.body.innerText.includes('Instrument')",
                 timeout=60_000,
             )
-            return page.content()
+
+            tables = page.locator("table")
+            n_tables = tables.count()
+
+            for ti in range(n_tables):
+                table = tables.nth(ti)
+
+                # headers
+                ths = table.locator("thead tr th")
+                if ths.count() == 0:
+                    ths = table.locator("tr th")  # fallback
+
+                headers = []
+                for i in range(ths.count()):
+                    headers.append(clean_cell_text(ths.nth(i).inner_text()))
+
+                headers_norm = [h.lower() for h in headers]
+                if "instrument" not in headers_norm or "dernier cours" not in headers_norm:
+                    continue  # pas la bonne table
+
+                # rows
+                rows = table.locator("tbody tr")
+                data_rows = []
+                for ri in range(rows.count()):
+                    tds = rows.nth(ri).locator("td")
+                    if tds.count() == 0:
+                        continue
+                    row = [clean_cell_text(tds.nth(ci).inner_text()) for ci in range(tds.count())]
+
+                    # ajuster longueur si mismatch
+                    if len(row) < len(headers):
+                        row += [""] * (len(headers) - len(row))
+                    if len(row) > len(headers):
+                        row = row[: len(headers)]
+
+                    data_rows.append(row)
+
+                if data_rows:
+                    df = pd.DataFrame(data_rows, columns=headers)
+                    dfs.append(df)
+
         except PlaywrightTimeout:
             page.screenshot(path="debug_timeout.png", full_page=True)
-            raise RuntimeError("Timeout: voir debug_timeout.png")
+            raise RuntimeError("Timeout page (voir debug_timeout.png)")
         finally:
             browser.close()
 
-
-def read_tables(html):
-    # lxml puis bs4 fallback
-    try:
-        return pd.read_html(html, decimal=",", thousands=" ", flavor="lxml")
-    except Exception:
-        return pd.read_html(html, decimal=",", thousands=" ", flavor="bs4")
-
-
-def filter_watchlist(df):
-    df = df.copy()
-    df.columns = [str(c).strip() for c in df.columns]
-
-    if "Instrument" not in df.columns:
-        raise RuntimeError(f"Colonne 'Instrument' introuvable. Colonnes: {list(df.columns)}")
-    if "Dernier cours" not in df.columns:
-        raise RuntimeError(f"Colonne 'Dernier cours' introuvable. Colonnes: {list(df.columns)}")
-
-    df["Instrument_str"] = df["Instrument"].astype(str).str.upper()
-
-    def map_symbol(instr):
-        for k, sym in WATCH_KEYWORDS.items():
-            if k in instr:
-                return sym
-        return None
-
-    df["symbol"] = df["Instrument_str"].map(map_symbol)
-    df = df[df["symbol"].notna()].copy()
-    return df
+    return dfs
 
 
 def main():
-    html = scrape_html()
-    tables = read_tables(html)
+    dfs = scrape_tables_dom()
+    if not dfs:
+        raise RuntimeError("Aucune table (Instrument + Dernier cours) détectée. Site changé ou blocage.")
 
-    main_df = pick_main_table(tables)
-    if main_df is None:
-        raise RuntimeError("Table principale non trouvée (Instrument / Dernier cours).")
+    # concat toutes les tables pertinentes
+    full = pd.concat(dfs, ignore_index=True)
 
-    watch_df = filter_watchlist(main_df)
+    # colonnes attendues (du site)
+    if "Instrument" not in full.columns or "Dernier cours" not in full.columns:
+        raise RuntimeError(f"Colonnes manquantes. Colonnes disponibles: {list(full.columns)}")
 
-    # Export complet (toutes colonnes site + symbol)
-    watch_df.drop(columns=["Instrument_str"], errors="ignore").to_csv(OUT_FULL, index=False)
+    # ajouter symbol + filtrer watchlist
+    full["symbol"] = full["Instrument"].apply(map_symbol)
+    watch_full = full[full["symbol"].notna()].copy()
 
-    # Export mini (colonnes GARANTIES pour agent_bourse_casa.py)
+    # Export full (toutes colonnes du site + symbol)
+    watch_full.to_csv(OUT_FULL, index=False)
+
+    # Export mini garanti
     mini = pd.DataFrame()
-    mini["symbol"] = watch_df["symbol"]
-    mini["last"] = watch_df["Dernier cours"]
+    mini["symbol"] = watch_full["symbol"]
+    mini["last"] = watch_full["Dernier cours"]
 
-    if "Variation en %" in watch_df.columns:
-        mini["pct"] = watch_df["Variation en %"]
+    # Variation en % si dispo
+    if "Variation en %" in watch_full.columns:
+        mini["pct"] = watch_full["Variation en %"]
     else:
-        mini["pct"] = None
+        mini["pct"] = ""
 
-    mini = mini.dropna(subset=["symbol"]).drop_duplicates(subset=["symbol"], keep="first")
-    mini = mini.sort_values("symbol")
+    mini = mini.drop_duplicates(subset=["symbol"], keep="first").sort_values("symbol")
     mini.to_csv(OUT_MINI, index=False)
 
     print("OK:", OUT_FULL, OUT_MINI)
-    print("Mini CSV preview:")
     print(mini)
 
 
