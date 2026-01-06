@@ -1,124 +1,165 @@
-import re
 import os
-import pandas as pd
-from playwright.sync_api import sync_playwright
+import csv
+import requests
 
-URL = "https://www.casablanca-bourse.com/fr/live-market/marche-actions-groupement"
+TOKEN = os.getenv("TELEGRAM_TOKEN")
+CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+BRANCH = os.getenv("GITHUB_REF_NAME", "unknown")
 
-# mapping tickers BVC -> labels dans ton système
-WATCH_TICKERS = {
-    "SNP": "SNEP",
-    "IAM": "IAM",
-    "HPS": "HPS",
-    "TGC": "TGCC",
+WATCHLIST = {
+    "SNEP": {"type": "Pivot", "achat": 495.0, "sortie": 610.0},
+    "HPS":  {"type": "Pivot", "achat": 556.0, "sortie": 675.0},
+    "IAM":  {"type": "Dividende", "achat": 109.0, "sortie": 130.0},
+    "TGCC": {"type": "Growth", "achat": 900.0, "sortie": 980.0},
 }
 
-OUT_CSV = "watchlist_prices.csv"
+CSV_PATH = "watchlist_prices.csv"
 
 
-def fr_to_float(s: str):
-    """
-    Convertit "744,90" ou "1 234,50" -> 1234.50
-    Retourne None si impossible.
-    """
-    if s is None:
+def _to_float(x):
+    if x is None:
         return None
-    s = str(s).strip().replace("\xa0", " ")
+    s = str(x).strip().replace("\xa0", " ").replace(" ", "").replace(",", ".")
     if s == "":
         return None
-    s = s.replace(" ", "").replace(",", ".")
     try:
         return float(s)
     except ValueError:
         return None
 
 
-def extract_numbers(text: str):
+def fmt_price(x):
+    if x is None:
+        return "n/a"
+    return f"{x:.2f}".rstrip("0").rstrip(".")
+
+
+def fmt_pct(p):
+    if p is None:
+        return "(n/a)"
+    return f"({p:+.1f}%)"
+
+
+def potentiel(last, sortie):
+    if last is None or sortie is None or last <= 0:
+        return None
+    return (sortie - last) / last * 100
+
+
+def decision(last, achat, sortie):
+    if last is None:
+        return "NA", "⚪"
+    if last <= achat:
+        return "Achat", "🟢"
+    if last >= sortie:
+        return "Vente", "🔴"
+    return "Attente", "🟡"
+
+
+def read_prices_csv(path):
     """
-    Extrait une liste de nombres (style FR) d'un texte de ligne.
+    Attend un CSV:
+    symbol,last,pct
+    SNEP,492,3
     """
-    if not text:
-        return []
-    nums = re.findall(r"[-+]?\d[\d\s]*,\d+|[-+]?\d+(?:\.\d+)?", text)
-    return nums
-
-
-def guess_last_and_pct(row_text: str):
-    """
-    Heuristique:
-    - last = premier nombre > 0
-    - pct = premier nombre dans [-50, 50] différent de last
-    """
-    nums = extract_numbers(row_text)
-    vals = [fr_to_float(n) for n in nums]
-    vals = [v for v in vals if v is not None]
-
-    last = next((v for v in vals if v > 0), None)
-    pct = next((v for v in vals if -50 <= v <= 50 and (last is None or v != last)), None)
-    return last, pct
-
-
-def scrape_watchlist():
-    rows_out = []
-
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
-        page = browser.new_page(locale="fr-FR")
-
-        page.goto(URL, wait_until="domcontentloaded", timeout=60_000)
-
-        # Attendre qu'une table existe (sélecteur générique)
-        page.wait_for_timeout(2000)
-
-        # Récupérer toutes les lignes visibles de table
-        # On prend tous les <tr> et on récupère le texte.
-        trs = page.locator("tr")
-        count = trs.count()
-
-        for i in range(count):
-            t = trs.nth(i).inner_text().strip()
-            if not t:
+    prices = {}
+    with open(path, newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        if not reader.fieldnames:
+            return prices
+        for r in reader:
+            sym = (r.get("symbol") or "").strip().upper()
+            if not sym:
                 continue
+            prices[sym] = {
+                "last": _to_float(r.get("last")),
+                "pct": _to_float(r.get("pct")),
+            }
+    return prices
 
-            # Cherche un ticker exact en début de ligne ou dans les tokens
-            tokens = [x.strip().upper() for x in re.split(r"\s+", t) if x.strip()]
-            if not tokens:
-                continue
 
-            # La première cellule est souvent le code; sinon on cherche dans la ligne
-            code = None
-            if tokens[0] in WATCH_TICKERS:
-                code = tokens[0]
-            else:
-                for tk in tokens[:6]:
-                    if tk in WATCH_TICKERS:
-                        code = tk
-                        break
+def send_telegram(text):
+    if not TOKEN or not CHAT_ID:
+        raise RuntimeError("Missing TELEGRAM_TOKEN or TELEGRAM_CHAT_ID")
 
-            if not code:
-                continue
+    url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
+    r = requests.post(url, json={"chat_id": CHAT_ID, "text": text}, timeout=20)
 
-            last, pct = guess_last_and_pct(t)
-            rows_out.append({
-                "symbol": WATCH_TICKERS[code],  # label (SNEP/IAM/HPS/TGCC)
-                "last": last,
-                "pct": pct
-            })
+    # Force visible debug
+    print("Telegram status:", r.status_code)
+    print("Telegram body:", r.text)
 
-        browser.close()
+    if r.status_code != 200:
+        raise RuntimeError("Telegram send failed")
 
-    df = pd.DataFrame(rows_out).drop_duplicates(subset=["symbol"], keep="last")
 
-    # Assure que toutes les valeurs attendues existent (même si manquantes)
-    for lbl in WATCH_TICKERS.values():
-        if lbl not in set(df["symbol"].tolist()):
-            df = pd.concat([df, pd.DataFrame([{"symbol": lbl, "last": None, "pct": None}])], ignore_index=True)
+def build_message(prices):
+    prefix = "[TEST] " if BRANCH != "main" else ""
 
-    df = df.sort_values("symbol")
-    df.to_csv(OUT_CSV, index=False)
-    print(f"OK: wrote {OUT_CSV}")
-    print(df)
+    items = []
+    for sym, cfg in WATCHLIST.items():
+        q = prices.get(sym, {})
+        last = q.get("last")
+        pct = q.get("pct")
+
+        pot = potentiel(last, cfg["sortie"])
+        lab, icon = decision(last, cfg["achat"], cfg["sortie"])
+
+        items.append({
+            "sym": sym,
+            "type": cfg["type"],
+            "achat": cfg["achat"],
+            "sortie": cfg["sortie"],
+            "last": last,
+            "pct": pct,
+            "pot": pot,
+            "label": lab,
+            "icon": icon,
+        })
+
+    # tri: potentiel desc, None à la fin
+    items.sort(key=lambda x: (x["pot"] is None, -(x["pot"] or -10**9)))
+
+    lines = []
+    lines.append(prefix + "📈 Bourse Casa (Auto)")
+    lines.append("Signal: 🟡 Neutre")
+    lines.append("")
+    lines.append("🧾 WATCHLIST (triée par potentiel)")
+
+    for it in items:
+        if it["last"] is None:
+            lines.append(
+                f"⚪ {it['sym']}_NA : n/a (n/a) [{fmt_price(it['achat'])} - {fmt_price(it['sortie'])}] • "
+                f"{it['type']} / pot n/a"
+            )
+            continue
+
+        lines.append(
+            f"{it['icon']} {it['sym']}_{it['label']} : {fmt_price(it['last'])} {fmt_pct(it['pct'])} "
+            f"[{fmt_price(it['achat'])} - {fmt_price(it['sortie'])}] • {it['type']} / pot {it['pot']:+.1f}%"
+        )
+
+    # Message non vide garanti
+    return "\n".join(lines)
+
+
+def main():
+    # Toujours envoyer quelque chose
+    if not os.path.exists(CSV_PATH):
+        msg = f"⚠️ watchlist_prices.csv introuvable. Scraper KO ou fichier non généré.\nBranch: {BRANCH}"
+        print(msg)
+        send_telegram(msg)
+        return
+
+    prices = read_prices_csv(CSV_PATH)
+
+    msg = build_message(prices)
+
+    print("=== MESSAGE TELEGRAM ===")
+    print(msg)
+
+    send_telegram(msg)
 
 
 if __name__ == "__main__":
-    scrape_watchlist()
+    main()
