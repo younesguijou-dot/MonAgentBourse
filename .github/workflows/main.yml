@@ -14,7 +14,6 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # --- Python + Playwright ---
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
@@ -30,7 +29,6 @@ jobs:
       - name: Scrape watchlist (full + mini CSV)
         run: python scrape_watchlist.py
 
-      # Optionnel pendant debug: voir le CSV dans les logs
       - name: Show mini CSV (debug)
         run: |
           echo "---- watchlist_prices.csv ----"
