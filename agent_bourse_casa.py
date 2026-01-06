@@ -4,7 +4,6 @@ import requests
 
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
-BRANCH = os.getenv("GITHUB_REF_NAME", "unknown")
 
 WATCHLIST = {
     "SNEP": {"type": "Pivot", "achat": 495.0, "sortie": 610.0},
@@ -36,7 +35,7 @@ def fmt_price(x):
     return f"{v:.2f}".rstrip("0").rstrip(".")
 
 
-def fmt_pct_str(pct_raw):
+def fmt_pct(pct_raw):
     if pct_raw is None:
         return "(n/a)"
     s = str(pct_raw).strip()
@@ -47,7 +46,7 @@ def fmt_pct_str(pct_raw):
 
 def potentiel(last_raw, sortie):
     last = fr_to_float(last_raw)
-    if last is None or sortie is None or last <= 0:
+    if last is None or last <= 0:
         return None
     return (sortie - last) / last * 100
 
@@ -63,21 +62,16 @@ def decision(last_raw, achat, sortie):
     return "Attente", "🟡"
 
 
-def read_prices_csv(path):
+def read_prices(path):
     prices = {}
     with open(path, newline="", encoding="utf-8") as f:
         reader = csv.DictReader(f)
         print("CSV columns:", reader.fieldnames)
-
         for r in reader:
             sym = (r.get("symbol") or "").strip().upper()
             if not sym:
                 continue
-
-            prices[sym] = {
-                "last": r.get("last") or r.get("Dernier cours"),
-                "pct": r.get("pct") or r.get("Variation en %"),
-            }
+            prices[sym] = {"last": r.get("last"), "pct": r.get("pct")}
     return prices
 
 
@@ -93,15 +87,11 @@ def send_telegram(text):
 
 
 def main():
-    prefix = "[TEST] " if BRANCH != "main" else ""
-
     if not os.path.exists(CSV_PATH):
-        msg = prefix + "⚠️ watchlist_prices.csv introuvable (scraper KO)."
-        print(msg)
-        send_telegram(msg)
+        send_telegram("⚠️ watchlist_prices.csv introuvable (scraper KO).")
         return
 
-    prices = read_prices_csv(CSV_PATH)
+    prices = read_prices(CSV_PATH)
 
     items = []
     for sym, cfg in WATCHLIST.items():
@@ -124,30 +114,28 @@ def main():
             "icon": icon,
         })
 
-    # tri par potentiel décroissant (None à la fin)
     items.sort(key=lambda x: (x["pot"] is None, -(x["pot"] or -10**9)))
 
-    lines = []
-    lines.append(prefix + "📈 Bourse Casa (Auto)")
-    lines.append("Signal: 🟡 Neutre")
-    lines.append("")
-    lines.append("🧾 WATCHLIST (triée par potentiel)")
+    lines = [
+        "📈 Bourse Casa (Auto)",
+        "Signal: 🟡 Neutre",
+        "",
+        "🧾 WATCHLIST (triée par potentiel)",
+    ]
 
     for it in items:
         if fr_to_float(it["last_raw"]) is None:
             lines.append(
                 f"⚪ {it['sym']}_NA : n/a (n/a) [{it['achat']} - {it['sortie']}] • {it['type']} / pot n/a"
             )
-            continue
-
-        lines.append(
-            f"{it['icon']} {it['sym']}_{it['label']} : {fmt_price(it['last_raw'])} {fmt_pct_str(it['pct_raw'])} "
-            f"[{it['achat']} - {it['sortie']}] • {it['type']} / pot {it['pot']:+.1f}%"
-        )
+        else:
+            lines.append(
+                f"{it['icon']} {it['sym']}_{it['label']} : {fmt_price(it['last_raw'])} {fmt_pct(it['pct_raw'])} "
+                f"[{it['achat']} - {it['sortie']}] • {it['type']} / pot {it['pot']:+.1f}%"
+            )
 
     msg = "\n".join(lines)
-    print("=== MESSAGE ===")
-    print(msg)
+    print("=== MESSAGE ===\n", msg)
     send_telegram(msg)
 
 
