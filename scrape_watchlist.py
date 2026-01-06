@@ -16,11 +16,12 @@ OUT_MINI = "watchlist_prices.csv"
 
 
 def pick_main_table(tables):
+    # priorité: Instrument + Dernier cours + Variation en %
     for df in tables:
         cols = [str(c).strip().lower() for c in df.columns]
         if "instrument" in cols and "dernier cours" in cols and "variation en %" in cols:
             return df
-    # fallback: instrument + dernier cours
+    # fallback
     for df in tables:
         cols = [str(c).strip().lower() for c in df.columns]
         if "instrument" in cols and "dernier cours" in cols:
@@ -49,6 +50,10 @@ def scrape_html():
 def filter_watchlist(df):
     df = df.copy()
     df.columns = [str(c).strip() for c in df.columns]
+
+    if "Instrument" not in df.columns:
+        raise RuntimeError(f"Colonne 'Instrument' introuvable. Colonnes: {list(df.columns)}")
+
     df["Instrument_str"] = df["Instrument"].astype(str).str.upper()
 
     def map_symbol(instr):
@@ -62,23 +67,32 @@ def filter_watchlist(df):
     return df
 
 
+def read_tables(html):
+    # parser robuste: lxml puis bs4 en fallback
+    try:
+        return pd.read_html(html, decimal=",", thousands=" ", flavor="lxml")
+    except Exception:
+        return pd.read_html(html, decimal=",", thousands=" ", flavor="bs4")
+
+
 def main():
     html = scrape_html()
 
-    tables = pd.read_html(html, decimal=",", thousands=" ")
+    tables = read_tables(html)
     main_df = pick_main_table(tables)
     if main_df is None:
         raise RuntimeError("Table principale non trouvée (Instrument / Dernier cours).")
 
     watch_df = filter_watchlist(main_df)
 
-    # Export complet (colonnes site)
+    # Export complet (toutes colonnes du site + symbol)
     watch_df.drop(columns=["Instrument_str"], errors="ignore").to_csv(OUT_FULL, index=False)
 
-    # Export mini: symbol, last, pct (pct = Variation en % telle quelle)
+    # Export mini pour Telegram
     mini = pd.DataFrame()
     mini["symbol"] = watch_df["symbol"]
     mini["last"] = watch_df["Dernier cours"]
+
     if "Variation en %" in watch_df.columns:
         mini["pct"] = watch_df["Variation en %"]
     else:
