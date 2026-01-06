@@ -3,6 +3,7 @@ from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeo
 
 URL = "https://www.casablanca-bourse.com/fr/live-market/marche-actions-groupement"
 
+# Basé sur ce que la colonne Instrument affiche réellement
 WATCH_KEYWORDS = {
     "SNEP": "SNEP",
     "ITISSALAT": "IAM",
@@ -16,12 +17,12 @@ OUT_MINI = "watchlist_prices.csv"
 
 
 def pick_main_table(tables):
-    # priorité: Instrument + Dernier cours + Variation en %
+    # priorité: table avec Instrument + Dernier cours + Variation en %
     for df in tables:
         cols = [str(c).strip().lower() for c in df.columns]
         if "instrument" in cols and "dernier cours" in cols and "variation en %" in cols:
             return df
-    # fallback
+    # fallback: Instrument + Dernier cours
     for df in tables:
         cols = [str(c).strip().lower() for c in df.columns]
         if "instrument" in cols and "dernier cours" in cols:
@@ -47,12 +48,22 @@ def scrape_html():
             browser.close()
 
 
+def read_tables(html):
+    # lxml puis bs4 fallback
+    try:
+        return pd.read_html(html, decimal=",", thousands=" ", flavor="lxml")
+    except Exception:
+        return pd.read_html(html, decimal=",", thousands=" ", flavor="bs4")
+
+
 def filter_watchlist(df):
     df = df.copy()
     df.columns = [str(c).strip() for c in df.columns]
 
     if "Instrument" not in df.columns:
         raise RuntimeError(f"Colonne 'Instrument' introuvable. Colonnes: {list(df.columns)}")
+    if "Dernier cours" not in df.columns:
+        raise RuntimeError(f"Colonne 'Dernier cours' introuvable. Colonnes: {list(df.columns)}")
 
     df["Instrument_str"] = df["Instrument"].astype(str).str.upper()
 
@@ -67,28 +78,20 @@ def filter_watchlist(df):
     return df
 
 
-def read_tables(html):
-    # parser robuste: lxml puis bs4 en fallback
-    try:
-        return pd.read_html(html, decimal=",", thousands=" ", flavor="lxml")
-    except Exception:
-        return pd.read_html(html, decimal=",", thousands=" ", flavor="bs4")
-
-
 def main():
     html = scrape_html()
-
     tables = read_tables(html)
+
     main_df = pick_main_table(tables)
     if main_df is None:
         raise RuntimeError("Table principale non trouvée (Instrument / Dernier cours).")
 
     watch_df = filter_watchlist(main_df)
 
-    # Export complet (toutes colonnes du site + symbol)
+    # Export complet (toutes colonnes site + symbol)
     watch_df.drop(columns=["Instrument_str"], errors="ignore").to_csv(OUT_FULL, index=False)
 
-    # Export mini pour Telegram
+    # Export mini (colonnes GARANTIES pour agent_bourse_casa.py)
     mini = pd.DataFrame()
     mini["symbol"] = watch_df["symbol"]
     mini["last"] = watch_df["Dernier cours"]
@@ -98,10 +101,12 @@ def main():
     else:
         mini["pct"] = None
 
-    mini = mini.drop_duplicates(subset=["symbol"], keep="first").sort_values("symbol")
+    mini = mini.dropna(subset=["symbol"]).drop_duplicates(subset=["symbol"], keep="first")
+    mini = mini.sort_values("symbol")
     mini.to_csv(OUT_MINI, index=False)
 
     print("OK:", OUT_FULL, OUT_MINI)
+    print("Mini CSV preview:")
     print(mini)
 
 
