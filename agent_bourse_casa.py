@@ -1,18 +1,12 @@
-import os
-import csv
+import os, csv, json
 import requests
+from datetime import datetime
 
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-WATCHLIST = {
-    "SNEP": {"type": "Pivot", "achat": 495.0, "sortie": 610.0},
-    "HPS":  {"type": "Pivot", "achat": 556.0, "sortie": 675.0},
-    "IAM":  {"type": "Dividende", "achat": 109.0, "sortie": 130.0},
-    "TGCC": {"type": "Growth", "achat": 900.0, "sortie": 980.0},
-}
-
 CSV_PATH = "watchlist_prices.csv"
+WATCHLIST_PATH = "watchlist.json"
 
 
 def fr_to_float(x):
@@ -37,37 +31,31 @@ def fmt_price(x):
 
 def fmt_pct(pct_raw):
     if pct_raw is None:
-        return "(n/a)"
+        return "n/a"
     s = str(pct_raw).strip()
     if s == "" or s.lower() == "nan":
-        return "(n/a)"
-    return f"({s})"
+        return "n/a"
+    return s
 
 
-def potentiel(last_raw, sortie):
-    last = fr_to_float(last_raw)
-    if last is None or last <= 0:
-        return None
-    return (sortie - last) / last * 100
+def send_telegram(text):
+    if not TOKEN or not CHAT_ID:
+        raise RuntimeError("Missing TELEGRAM_TOKEN or TELEGRAM_CHAT_ID")
+    url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
+    r = requests.post(url, json={"chat_id": CHAT_ID, "text": text}, timeout=20)
+    if r.status_code != 200:
+        raise RuntimeError(f"Telegram send failed: {r.status_code} {r.text}")
 
 
-def decision(last_raw, achat, sortie):
-    last = fr_to_float(last_raw)
-    if last is None:
-        return "NA", "⚪"
-    if last <= achat:
-        return "Achat", "🟢"
-    if last >= sortie:
-        return "Vente", "🔴"
-    return "Attente", "🟡"
+def read_watchlist():
+    with open(WATCHLIST_PATH, "r", encoding="utf-8") as f:
+        return json.load(f)
 
 
-def read_prices(path):
+def read_prices():
     prices = {}
-    with open(path, newline="", encoding="utf-8") as f:
-        reader = csv.DictReader(f)
-        print("CSV columns:", reader.fieldnames)
-        for r in reader:
+    with open(CSV_PATH, newline="", encoding="utf-8") as f:
+        for r in csv.DictReader(f):
             sym = (r.get("symbol") or "").strip().upper()
             if not sym:
                 continue
@@ -75,67 +63,87 @@ def read_prices(path):
     return prices
 
 
-def send_telegram(text):
-    if not TOKEN or not CHAT_ID:
-        raise RuntimeError("Missing TELEGRAM_TOKEN or TELEGRAM_CHAT_ID")
-
-    url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
-    r = requests.post(url, json={"chat_id": CHAT_ID, "text": text}, timeout=20)
-    print("Telegram:", r.status_code, r.text)
-    if r.status_code != 200:
-        raise RuntimeError("Telegram send failed")
+def decision_icon(last, achat, sortie):
+    if last is None:
+        return "⚪", "NA"
+    if last <= achat:
+        return "🟢", "Achat"
+    if last >= sortie:
+        return "🔴", "Vente"
+    return "🟡", "Attente"
 
 
 def main():
     if not os.path.exists(CSV_PATH):
-        send_telegram("⚠️ watchlist_prices.csv introuvable (scraper KO).")
+        send_telegram("⚠️ Données indisponibles (watchlist_prices.csv introuvable).")
         return
 
-    prices = read_prices(CSV_PATH)
+    if not os.path.exists(WATCHLIST_PATH):
+        send_telegram("⚠️ watchlist.json introuvable. Ajoute le fichier de configuration.")
+        return
+
+    wl = read_watchlist()
+    px = read_prices()
 
     items = []
-    for sym, cfg in WATCHLIST.items():
-        q = prices.get(sym, {})
-        last_raw = q.get("last")
+    for sym, cfg in wl.items():
+        q = px.get(sym, {})
+        last = fr_to_float(q.get("last"))
         pct_raw = q.get("pct")
 
-        pot = potentiel(last_raw, cfg["sortie"])
-        lab, icon = decision(last_raw, cfg["achat"], cfg["sortie"])
+        achat = float(cfg["achat"])
+        sortie = float(cfg["sortie"])
+        cat = cfg.get("categorie", "NA")
 
+        pot = None if (last is None or last <= 0) else (sortie - last) / last * 100
+        dist_achat = None if last is None else (last - achat) / achat * 100  # >0 au-dessus achat
+
+        icon, label = decision_icon(last, achat, sortie)
+
+        # score opportunité (simple, lisible)
+        # +potentiel, +proximité achat (plus proche = meilleur), pénalité si très loin
+        score = 0
+        if pot is not None:
+            score += pot
+        if dist_achat is not None:
+            score += max(0, 8 - abs(dist_achat))  # bonus si proche (±8%)
         items.append({
             "sym": sym,
-            "type": cfg["type"],
-            "achat": cfg["achat"],
-            "sortie": cfg["sortie"],
-            "last_raw": last_raw,
+            "cat": cat,
+            "achat": achat,
+            "sortie": sortie,
+            "last": last,
             "pct_raw": pct_raw,
             "pot": pot,
-            "label": lab,
+            "dist_achat": dist_achat,
             "icon": icon,
+            "label": label,
+            "score": score
         })
 
-    items.sort(key=lambda x: (x["pot"] is None, -(x["pot"] or -10**9)))
+    items.sort(key=lambda x: x["score"], reverse=True)
 
-    lines = [
-        "📈 Bourse Casa (Auto)",
-        "Signal: 🟡 Neutre",
-        "",
-        "🧾 WATCHLIST (triée par potentiel)",
-    ]
+    now = datetime.now().strftime("%d/%m %H:%M")
+    header = f"📈 Bourse Casa (Auto) — 🟡 Neutre\n{now}"
 
+    # Top opportunité (celle la plus proche zone achat ou meilleur score)
+    top = items[0] if items else None
+    top_line = ""
+    if top and top["last"] is not None and top["dist_achat"] is not None:
+        top_line = f"\nTop: {top['icon']} {top['sym']} ({top['label']}) | pot {top['pot']:+.1f}% | Δachat {top['dist_achat']:+.1f}%"
+
+    lines = [header + top_line, ""]
     for it in items:
-        if fr_to_float(it["last_raw"]) is None:
-            lines.append(
-                f"⚪ {it['sym']}_NA : n/a (n/a) [{it['achat']} - {it['sortie']}] • {it['type']} / pot n/a"
-            )
-        else:
-            lines.append(
-                f"{it['icon']} {it['sym']}_{it['label']} : {fmt_price(it['last_raw'])} {fmt_pct(it['pct_raw'])} "
-                f"[{it['achat']} - {it['sortie']}] • {it['type']} / pot {it['pot']:+.1f}%"
-            )
+        if it["last"] is None:
+            lines.append(f"⚪ {it['sym']}_NA : n/a (n/a) [{it['achat']:.0f}→{it['sortie']:.0f}] • {it['cat']} • pot n/a")
+            continue
 
-    msg = "\n".join(lines)
-    print("=== MESSAGE ===\n", msg)
+        lines.append(
+            f"{it['icon']} {it['sym']}_{it['label']} : {fmt_price(it['last'])} ({fmt_pct(it['pct_raw'])}) "
+            f"[{it['achat']:.0f}→{it['sortie']:.0f}] • {it['cat']} • pot {it['pot']:+.1f}% • Δachat {it['dist_achat']:+.1f}%"
+        )
+
+    msg = "\n".join(lines).strip()
     send_telegram(msg)
 
 
