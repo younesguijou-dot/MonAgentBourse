@@ -1,5 +1,73 @@
+name: Scan Bourse Quotidien
+
+on:
+  schedule:
+    - cron: "45 14 * * 1-5"
+  workflow_dispatch:
+
+jobs:
+  run-bot:
+    if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ---------- R (MASI via casabourse) ----------
+      - name: Setup R
+        uses: r-lib/actions/setup-r@v2
+
+      - name: Install system libs + CA certificates
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ca-certificates libcurl4-openssl-dev libxml2-dev libssl-dev
+          sudo update-ca-certificates
+
+      - name: Install R dependencies (cached)
+        uses: r-lib/actions/setup-r-dependencies@v2
+        with:
+          packages: |
+            gsheet
+            rvest
+            RJSONIO
+            R.utils
+
+      - name: Install casabourse (CRAN archive)
+        run: |
+          Rscript -e 'install.packages("https://cran.r-project.org/src/contrib/Archive/casabourse/casabourse_2.0.0.tar.gz", repos=NULL, type="source")'
+
+      - name: Fetch MASI
+        run: Rscript fetch_masi.R
+
+      # ---------- Python + Playwright ----------
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.9"
+          cache: "pip"
+
+      - name: Install Python deps + Playwright browser
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          python -m playwright install --with-deps chromium
+
+      - name: Scrape watchlist (Playwright)
+        run: python scrape_watchlist.py
+
+      # ---------- Telegram (diagnostic step) ----------
+      # IMPORTANT: ajoute le fichier test_telegram.py à la racine du repo
       - name: Test Telegram
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: python test_telegram.py
+
+      # ---------- Telegram report ----------
+      - name: Send Telegram report
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          GITHUB_REF_NAME: ${{ github.ref_name }}
+        run: python agent_bourse_casa.py
