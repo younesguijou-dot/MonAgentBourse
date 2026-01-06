@@ -47,7 +47,7 @@ jobs:
           python-version: "3.9"
           cache: "pip"
 
-      - name: Install Python deps
+      - name: Install Python deps + Playwright browser
         run: |
           pip install --upgrade pip
           pip install -r requirements.txt
