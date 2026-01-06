@@ -51,10 +51,10 @@ def scrape_watchlist():
         try:
             page.goto(URL, wait_until="domcontentloaded", timeout=60_000)
 
-            # attendre que la page contienne au moins un code attendu
+            # FIX: passer l'argument via keyword 'arg='
             page.wait_for_function(
                 """(codes) => document.body && codes.some(c => document.body.innerText.includes(c))""",
-                list(MAP.keys()),
+                arg=list(MAP.keys()),
                 timeout=60_000,
             )
 
