@@ -42,7 +42,6 @@ def fmt_pct_str(pct_raw):
     s = str(pct_raw).strip()
     if s == "" or s.lower() == "nan":
         return "(n/a)"
-    # garder affichage du site
     return f"({s})"
 
 
@@ -67,11 +66,18 @@ def decision(last_raw, achat, sortie):
 def read_prices_csv(path):
     prices = {}
     with open(path, newline="", encoding="utf-8") as f:
-        for r in csv.DictReader(f):
+        reader = csv.DictReader(f)
+        print("CSV columns:", reader.fieldnames)
+
+        for r in reader:
             sym = (r.get("symbol") or "").strip().upper()
             if not sym:
                 continue
-            prices[sym] = {"last": r.get("last"), "pct": r.get("pct")}
+
+            prices[sym] = {
+                "last": r.get("last") or r.get("Dernier cours"),
+                "pct": r.get("pct") or r.get("Variation en %"),
+            }
     return prices
 
 
@@ -118,7 +124,7 @@ def main():
             "icon": icon,
         })
 
-    # tri par potentiel desc (None à la fin)
+    # tri par potentiel décroissant (None à la fin)
     items.sort(key=lambda x: (x["pot"] is None, -(x["pot"] or -10**9)))
 
     lines = []
