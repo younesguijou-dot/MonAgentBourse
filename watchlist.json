@@ -1,0 +1,6 @@
+{
+  "SNEP": {"categorie":"Pivot", "achat":495, "sortie":610},
+  "HPS":  {"categorie":"Pivot", "achat":556, "sortie":675},
+  "IAM":  {"categorie":"Dividende", "achat":109, "sortie":130},
+  "TGCC": {"categorie":"Growth", "achat":900, "sortie":980}
+}
